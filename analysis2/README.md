@@ -119,9 +119,12 @@ The example explicitly enables Name deduplication with `--name-threshold 0.98`; 
 that flag to skip both the Name index build and Name duplicate queries.
 
 Successful non-price provider JSON responses are durably cached under
-`intermediate/api_success_cache/`. Cache identities exclude API secrets and are
-independent of the derived evidence-cache version. Failed responses are retried;
-Alchemy spot-price responses remain day-refreshed rather than permanent.
+`intermediate/api_success_cache/v2/<provider>/<sha-prefix>/` as zstd-compressed,
+SHA-256-addressed entries. Cache identities exclude API secrets and are independent
+of the derived evidence-cache version. The next full run incrementally migrates and
+then removes legacy provider-level `*.json` entries only after the compressed entry
+is readable, so an interrupted migration remains resumable. Failed responses are
+retried; Alchemy spot-price responses remain day-refreshed rather than permanent.
 Candidate controller and Solana collection-identity probes are additionally
 checkpointed by stable chain/address under
 `intermediate/candidate_identity_cache.json`, so changing HTTP batch boundaries
@@ -174,16 +177,18 @@ derived dedup results.
 ### Evidence cache (skip re-enrich / resume after interrupt)
 
 While enrich runs, network results are checkpointed **in batches** (default every 16
-candidates):
+candidates) as independently replaceable compressed shards:
 
 ```text
-<output-dir>/intermediate/evidence_cache.json       # full snapshot (written once at finish)
-<output-dir>/intermediate/evidence_cache.jsonl      # append-only per-candidate lines
 <output-dir>/intermediate/evidence_cache.meta.json  # version + params
+<output-dir>/intermediate/evidence_cache.entries/   # SHA-256-sharded candidate *.json.zst
 ```
 
 (override base path with `--evidence-cache PATH`). Bundles use stable chain/address;
-`contract_id` is remapped on load.
+`contract_id` is remapped on load. Existing `evidence_cache.jsonl` and
+`evidence_cache.json` files remain import-compatible: a compatible cache is converted
+before reuse, and the two legacy files are removed only after all shards and the new
+meta file are safely published.
 
 On the next `run` with the same output dir / params, the cache is **auto-resumed**:
 already-cached candidates skip HTTP and only missing ones are fetched. A missing,

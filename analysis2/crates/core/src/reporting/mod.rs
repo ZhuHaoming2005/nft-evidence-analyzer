@@ -24,10 +24,11 @@ pub use dedup_cache::{
 };
 pub use evidence_cache::{
     DEFAULT_EVIDENCE_CACHE_BATCH, DEFAULT_EVIDENCE_CACHE_FILE, EVIDENCE_CACHE_VERSION,
-    EvidenceCacheFile, EvidenceCacheParams, EvidenceCacheSink, build_evidence_cache,
-    default_evidence_cache_path, evidence_cache_artifacts_present, evidence_cache_params,
-    load_evidence_cache, load_evidence_cache_resumable, rematerialize_evidence,
-    validate_evidence_cache, write_evidence_cache,
+    EvidenceCacheFile, EvidenceCacheMigrationStats, EvidenceCacheParams, EvidenceCacheSink,
+    build_evidence_cache, default_evidence_cache_path, evidence_cache_artifacts_present,
+    evidence_cache_params, load_evidence_cache, load_evidence_cache_resumable,
+    migrate_evidence_cache_layout, rematerialize_evidence, rematerialize_evidence_owned,
+    validate_evidence_cache, write_evidence_cache, write_evidence_cache_sharded,
 };
 pub use json::{
     DedupRunParams, SeedDedupReport, SeedRecord, SeedRelationJson, build_seed_dedup_report,

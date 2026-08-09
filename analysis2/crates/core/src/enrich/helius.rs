@@ -1,8 +1,10 @@
 //! Helius DAS helpers for Solana collection resolve + enrichment.
 //!
-//! History paths use DAS `getSignaturesForAsset` for ordinary and compressed
-//! NFTs, then feed deduped `getTransaction` jsonParsed decode (standard SPL
-//! ownership + native SOL balance / transfer instructions).
+//! History paths prefer DAS `getSignaturesForAsset` for ordinary and compressed
+//! NFTs. When Helius reports `Tree not found` for an ordinary NFT, the bounded
+//! `getSignaturesForAddress` fallback is retained as explicitly truncated
+//! evidence. Both paths then feed deduped `getTransaction` jsonParsed decode
+//! (standard SPL ownership + native SOL balance / transfer instructions).
 //! Compressed NFT / Bubblegum full parity is intentionally out of MVP scope.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -814,8 +816,62 @@ fn signature_request(asset: &SolanaAsset, request_id: String, max_sigs: usize) -
     })
 }
 
+fn signatures_for_address_request(
+    asset: &SolanaAsset,
+    request_id: String,
+    max_sigs: usize,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "getSignaturesForAddress",
+        "params": [asset.mint, {"limit": max_sigs}]
+    })
+}
+
 fn signature_method(_asset: &SolanaAsset) -> &'static str {
     "getSignaturesForAsset"
+}
+
+fn ordinary_asset_tree_not_found(asset: &SolanaAsset, payload: &Value) -> bool {
+    if asset.compressed {
+        return false;
+    }
+    let Some(error) = payload.get("error") else {
+        return false;
+    };
+    error.get("code").and_then(Value::as_i64) == Some(-32000)
+        && error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("Tree not found"))
+}
+
+async fn fetch_asset_history_single(
+    client: &HttpClient,
+    url: &str,
+    asset: &SolanaAsset,
+    max_sigs: usize,
+) -> AssetHistoryRow {
+    let body = signature_request(asset, format!("sigs-{}", asset.mint), max_sigs);
+    let payload = client
+        .post_json_helius(url, &[], &body)
+        .await
+        .map_err(|error| format!("{} {}: {error}", signature_method(asset), asset.mint))?;
+    if ordinary_asset_tree_not_found(asset, &payload) {
+        let fallback_body =
+            signatures_for_address_request(asset, format!("address-sigs-{}", asset.mint), max_sigs);
+        let fallback_payload = client
+            .post_json_helius(url, &[], &fallback_body)
+            .await
+            .map_err(|error| format!("getSignaturesForAddress fallback {}: {error}", asset.mint))?;
+        let (transfers, sales, _) = parse_address_history(asset, &fallback_payload, max_sigs)?;
+        // A mint address is not guaranteed to appear in every SPL token-account
+        // transfer. The fallback recovers observable history but cannot prove
+        // complete coverage, even when fewer than `max_sigs` rows are returned.
+        return Ok((transfers, sales, true));
+    }
+    parse_asset_history(asset, &payload, max_sigs)
 }
 
 async fn fetch_asset_history_batch(
@@ -826,20 +882,7 @@ async fn fetch_asset_history_batch(
     max_sigs: usize,
 ) -> Vec<AssetHistoryRow> {
     if assets.len() == 1 {
-        let body = signature_request(&assets[0], format!("sigs-{}", assets[0].mint), max_sigs);
-        return vec![
-            client
-                .post_json_helius(url, &[], &body)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "{} {}: {error}",
-                        signature_method(&assets[0]),
-                        assets[0].mint
-                    )
-                })
-                .and_then(|payload| parse_asset_history(&assets[0], &payload, max_sigs)),
-        ];
+        return vec![fetch_asset_history_single(client, url, &assets[0], max_sigs).await];
     }
 
     let body = Value::Array(
@@ -884,16 +927,12 @@ async fn fetch_asset_history_batch(
     // A malformed/partial batch must not lose an asset history. Retry every
     // member independently so quality remains identical to the old path.
     let mut handles = Vec::with_capacity(assets.len());
-    for asset in assets.iter().cloned() {
+    for asset in assets {
+        let asset = asset.clone();
         let client = client.clone();
         let url = url.to_owned();
         handles.push(tokio::spawn(async move {
-            let body = signature_request(&asset, format!("sigs-{}", asset.mint), max_sigs);
-            client
-                .post_json_helius(&url, &[], &body)
-                .await
-                .map_err(|error| format!("{} {}: {error}", signature_method(&asset), asset.mint))
-                .and_then(|payload| parse_asset_history(&asset, &payload, max_sigs))
+            fetch_asset_history_single(&client, &url, &asset, max_sigs).await
         }));
     }
     let mut rows = Vec::with_capacity(handles.len());
@@ -924,13 +963,40 @@ fn parse_asset_history(asset: &SolanaAsset, payload: &Value, max_sigs: usize) ->
                 "getSignaturesForAsset {}: response omitted result.items",
                 asset.mint
             )
-        })?
-        .clone();
+        })?;
+    parse_history_items(asset, items, max_sigs, false)
+}
+
+fn parse_address_history(asset: &SolanaAsset, payload: &Value, max_sigs: usize) -> AssetHistoryRow {
+    if let Some(error) = payload.get("error") {
+        return Err(format!(
+            "getSignaturesForAddress fallback {}: JSON-RPC error {error}",
+            asset.mint
+        ));
+    }
+    let items = payload
+        .get("result")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "getSignaturesForAddress fallback {}: response omitted result array",
+                asset.mint
+            )
+        })?;
+    parse_history_items(asset, items, max_sigs, true)
+}
+
+fn parse_history_items(
+    asset: &SolanaAsset,
+    items: &[Value],
+    max_sigs: usize,
+    force_truncated: bool,
+) -> AssetHistoryRow {
     let page_truncated = items.len() >= max_sigs;
     let mut transfers = Vec::new();
     let mut sales = Vec::new();
     for item in items {
-        let (signature, event_type) = parse_signature_item(&item);
+        let (signature, event_type) = parse_signature_item(item);
         if signature.is_empty() {
             continue;
         }
@@ -962,7 +1028,7 @@ fn parse_asset_history(asset: &SolanaAsset, payload: &Value, max_sigs: usize) ->
             });
         }
     }
-    Ok((transfers, sales, page_truncated))
+    Ok((transfers, sales, force_truncated || page_truncated))
 }
 
 #[derive(Default)]
@@ -2395,6 +2461,37 @@ mod tests {
         assert!(error.contains("invalid asset"));
     }
 
+    #[test]
+    fn tree_not_found_fallback_requires_exact_ordinary_error() {
+        let ordinary = SolanaAsset {
+            mint: "ordinary".into(),
+            compressed: false,
+            ..SolanaAsset::default()
+        };
+        let compressed = SolanaAsset {
+            mint: "compressed".into(),
+            compressed: true,
+            ..SolanaAsset::default()
+        };
+        let tree_not_found = json!({
+            "error": {
+                "code": -32000,
+                "message": "Database Error: RecordNotFound Error: Tree not found"
+            }
+        });
+
+        assert!(ordinary_asset_tree_not_found(&ordinary, &tree_not_found));
+        assert!(!ordinary_asset_tree_not_found(&compressed, &tree_not_found));
+        assert!(!ordinary_asset_tree_not_found(
+            &ordinary,
+            &json!({"error": {"code": -32602, "message": "Tree not found"}})
+        ));
+        assert!(!ordinary_asset_tree_not_found(
+            &ordinary,
+            &json!({"error": {"code": -32000, "message": "Record not found"}})
+        ));
+    }
+
     #[tokio::test]
     async fn asset_histories_batch_ten_assets_into_one_http_request() {
         let server = MockServer::start_async().await;
@@ -2461,6 +2558,106 @@ mod tests {
         assert_eq!(outcome.value.0.len(), 1);
         assert_eq!(outcome.value.0[0].tx_hash, "ordinary-signature");
         assert!(outcome.value.1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ordinary_nft_tree_not_found_falls_back_as_truncated() {
+        let server = MockServer::start_async().await;
+        let primary = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .body_contains("getSignaturesForAsset")
+                    .body_contains("ordinary-tree-mint");
+                then.status(200).json_body(json!({
+                    "jsonrpc": "2.0",
+                    "id": "sigs-ordinary-tree-mint",
+                    "error": {
+                        "code": -32000,
+                        "message": "Database Error: RecordNotFound Error: Tree not found"
+                    }
+                }));
+            })
+            .await;
+        let fallback = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .body_contains("getSignaturesForAddress")
+                    .body_contains("ordinary-tree-mint");
+                then.status(200).json_body(json!({
+                    "jsonrpc": "2.0",
+                    "id": "address-sigs-ordinary-tree-mint",
+                    "result": [{
+                        "signature": "fallback-signature",
+                        "slot": 42,
+                        "blockTime": 123
+                    }]
+                }));
+            })
+            .await;
+        let asset = SolanaAsset {
+            mint: "ordinary-tree-mint".into(),
+            owner: Some("owner".into()),
+            compressed: false,
+        };
+        let client = HttpClient::with_retries(1, 0).unwrap();
+        let outcome =
+            fetch_asset_histories(&client, &server.base_url(), Some("key"), &[asset], 1, 10).await;
+
+        assert_eq!(primary.hits(), 1);
+        assert_eq!(fallback.hits(), 1);
+        assert_eq!(outcome.status, EvidenceStatus::Truncated);
+        assert!(outcome.truncated);
+        assert_eq!(outcome.value.0.len(), 1);
+        assert_eq!(outcome.value.0[0].tx_hash, "fallback-signature");
+        assert!(outcome.value.1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compressed_nft_tree_not_found_does_not_fall_back() {
+        let server = MockServer::start_async().await;
+        let primary = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .body_contains("getSignaturesForAsset")
+                    .body_contains("compressed-tree-mint");
+                then.status(200).json_body(json!({
+                    "jsonrpc": "2.0",
+                    "id": "sigs-compressed-tree-mint",
+                    "error": {
+                        "code": -32000,
+                        "message": "Database Error: RecordNotFound Error: Tree not found"
+                    }
+                }));
+            })
+            .await;
+        let fallback = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .body_contains("getSignaturesForAddress")
+                    .body_contains("compressed-tree-mint");
+                then.status(500);
+            })
+            .await;
+        let asset = SolanaAsset {
+            mint: "compressed-tree-mint".into(),
+            owner: Some("owner".into()),
+            compressed: true,
+        };
+        let client = HttpClient::with_retries(1, 0).unwrap();
+        let outcome =
+            fetch_asset_histories(&client, &server.base_url(), Some("key"), &[asset], 1, 10).await;
+
+        assert_eq!(primary.hits(), 1);
+        assert_eq!(fallback.hits(), 0);
+        assert_eq!(outcome.status, EvidenceStatus::Failed);
+        assert!(outcome.value.0.is_empty());
+        assert!(outcome.value.1.is_empty());
+        assert!(
+            outcome
+                .failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("Tree not found"))
+        );
     }
 
     #[tokio::test]

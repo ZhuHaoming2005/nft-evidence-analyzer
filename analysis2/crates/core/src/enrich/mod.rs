@@ -15,8 +15,9 @@ pub mod value_flow;
 
 pub use helius::{parse_collection_address, resolve_collection_address};
 pub use http::{
-    HttpClient, OPENSEA_RATE_LIMIT_BURST, OPENSEA_RATE_LIMIT_REFILL_MS, TokenBucketRateLimiter,
-    is_http_not_found, print_provider_error,
+    HttpClient, OPENSEA_RATE_LIMIT_BURST, OPENSEA_RATE_LIMIT_REFILL_MS, SuccessCacheMigrationStats,
+    TokenBucketRateLimiter, is_http_not_found, migrate_legacy_success_response_cache,
+    migrate_legacy_success_response_cache_with_progress, print_provider_error,
 };
 pub use legit_detect::attach_relation_legit;
 pub use opensea::{OpenSeaRankedItem, parse_top_collections};

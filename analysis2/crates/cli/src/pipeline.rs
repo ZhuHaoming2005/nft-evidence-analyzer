@@ -19,14 +19,15 @@ use analysis2_core::{
     cache_fingerprint, candidate_json_rel_path, default_dedup_cache_path,
     default_evidence_cache_path, enrich_candidates_with_hook, evidence_cache_artifacts_present,
     evidence_cache_params, finalize_legit_signals, load_dedup_cache, load_evidence_cache_resumable,
-    load_resident_store_uri_ready, load_seeds_json, prepare_seed_nft_caches,
+    load_resident_store_uri_ready, load_seeds_json, migrate_evidence_cache_layout,
+    migrate_legacy_success_response_cache_with_progress, prepare_seed_nft_caches,
     query_metadata_for_seed_with_scratch, query_name_for_seed_with_scratch,
     query_uri_for_seed_with_scratch, refresh_cached_evm_holders, refresh_cached_prices,
     refresh_relation_legit, release_resident_seed_nfts, rematerialize_dedup_batch,
-    rematerialize_evidence, resolve_seed_contract, scopes_complete_for_seed,
+    rematerialize_evidence_owned, resolve_seed_contract, scopes_complete_for_seed,
     serialize_candidate_json, validate_dedup_cache, validate_evidence_cache,
-    write_candidate_json_bytes, write_dedup_cache, write_dedup_outputs, write_evidence_cache,
-    write_run_outputs,
+    write_candidate_json_bytes, write_dedup_cache, write_dedup_outputs,
+    write_evidence_cache_sharded, write_run_outputs,
 };
 use rayon::prelude::*;
 
@@ -1136,14 +1137,28 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
     drop(contract_nfts);
 
     progress.set_stage("enrich");
+    let success_response_cache_dir = config
+        .output_dir
+        .join(INTERMEDIATE_DIR)
+        .join("api_success_cache");
+    progress.begin_phase("migrate_api_success_cache", None);
+    let migration =
+        migrate_legacy_success_response_cache_with_progress(&success_response_cache_dir, || {
+            progress.add_completed(1)
+        });
+    if migration.scanned > 0 {
+        eprintln!(
+            "API success cache: migrated {}/{} legacy entries (failed={}, removed={} bytes, compressed={} bytes)",
+            migration.migrated,
+            migration.scanned,
+            migration.failed,
+            migration.legacy_bytes_removed,
+            migration.compressed_bytes,
+        );
+    }
     let limits = HttpLimits {
         concurrency: config.http_concurrency.max(1),
-        success_response_cache_dir: Some(
-            config
-                .output_dir
-                .join(INTERMEDIATE_DIR)
-                .join("api_success_cache"),
-        ),
+        success_response_cache_dir: Some(success_response_cache_dir),
         candidate_identity_cache_path: Some(
             config
                 .output_dir
@@ -1181,9 +1196,18 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
                 if let Err(e) = validate_evidence_cache(&cache, &evidence_params) {
                     eprintln!("evidence: IGNORING incompatible cache (will re-fetch HTTP): {e}");
                 } else {
+                    let migration = migrate_evidence_cache_layout(&evidence_path, &cache)?;
+                    if migration.legacy_files_removed > 0 {
+                        eprintln!(
+                            "evidence: migrated {} bundles to compressed shards; removed {} legacy files ({} bytes)",
+                            migration.bundles,
+                            migration.legacy_files_removed,
+                            migration.legacy_bytes_removed,
+                        );
+                    }
                     refresh_prices =
                         cache.params.pricing_day_utc != evidence_params.pricing_day_utc;
-                    evidence = rematerialize_evidence(&store, &cache)?;
+                    evidence = rematerialize_evidence_owned(&store, cache)?;
                     relation_refresh =
                         reconcile_cached_relation_legit(&mut evidence, &registry, &store);
                     let current_candidates: AHashSet<ContractId> =
@@ -1232,7 +1256,7 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
             let map = hook(&registry, &store, progress)?;
             progress.begin_phase("write_evidence_cache", Some(1));
             let evidence_file = build_evidence_cache(evidence_params.clone(), &map);
-            write_evidence_cache(&evidence_path, &evidence_file)?;
+            write_evidence_cache_sharded(&evidence_path, &evidence_file)?;
             progress.add_completed(1);
             map
         }
@@ -1272,10 +1296,8 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
                 && holder_only.is_empty()
             {
                 eprintln!(
-                    "evidence: all {total_cands} candidates covered by cache; skipping HTTP enrich (no snapshot rewrite)"
+                    "evidence: all {total_cands} candidates covered by cache; skipping HTTP enrich"
                 );
-                // Do not rewrite evidence_cache.json here: multi‑GB rewrite can
-                // dominate re-run wall time when HTTP is already fully cached.
                 evidence
             } else {
                 let subset = registry.filter_candidates(&missing);
@@ -1290,10 +1312,6 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
                     evidence_params.clone(),
                     DEFAULT_EVIDENCE_CACHE_BATCH,
                 )?;
-                // Seed in-memory snapshot index only (do not re-append jsonl).
-                for bundle in evidence.values() {
-                    sink.note_cached(bundle);
-                }
 
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -1364,11 +1382,11 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
                 drop(runtime);
                 // Flush even on cancel / error so partial progress is reusable.
                 match sink.finish() {
-                    Ok(final_cache) => {
+                    Ok(bundle_count) => {
                         eprintln!(
                             "evidence: checkpoint {} ({} bundles on disk)",
                             evidence_path.display(),
-                            final_cache.bundles.len()
+                            bundle_count
                         );
                     }
                     Err(e) => eprintln!("evidence: final cache flush failed: {e}"),
@@ -2293,7 +2311,10 @@ mod tests {
 
         run(&base_config(), &analysis2_core::NoopProgress).expect("first run");
         assert!(cache_path.is_file(), "dedup cache must be written");
-        assert!(evidence_path.is_file(), "evidence cache must be written");
+        assert!(
+            evidence_cache_artifacts_present(&evidence_path),
+            "evidence cache must be written"
+        );
 
         // Compatible caches are always reused without control flags.
         run(&base_config(), &analysis2_core::NoopProgress).expect("auto-reuse run");
@@ -2302,6 +2323,7 @@ mod tests {
         // Damaged caches are ignored; dedup recomputes and enrich falls through
         // instead of turning cache reuse into an output-blocking requirement.
         std::fs::write(&cache_path, b"{broken").unwrap();
+        let _ = std::fs::remove_dir_all(evidence_path.with_file_name("evidence_cache.entries"));
         std::fs::write(&evidence_path, b"{broken").unwrap();
         run(&base_config(), &analysis2_core::NoopProgress)
             .expect("invalid caches must fall back automatically");

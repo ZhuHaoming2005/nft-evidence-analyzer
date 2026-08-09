@@ -1,6 +1,7 @@
 //! Shared HTTP client scaffolding for seed selection and enrichment.
 
 use std::fs;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::error::Analysis2Error;
@@ -26,6 +28,9 @@ pub const OPENSEA_RATE_LIMIT_REFILL_MS: u64 = 300;
 pub const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(1);
 const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 static CACHE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const SUCCESS_CACHE_FORMAT_VERSION: u32 = 2;
+const SUCCESS_CACHE_ZSTD_LEVEL: i32 = 3;
+const SUCCESS_CACHE_V2_DIR: &str = "v2";
 
 #[derive(Clone, Debug)]
 struct SuccessResponseCache {
@@ -38,45 +43,201 @@ struct SuccessCacheEntry {
     response: Value,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SuccessCacheEntryV2 {
+    version: u32,
+    response: Value,
+}
+
+#[derive(Serialize)]
+struct SuccessCacheEntryV2Ref<'a> {
+    version: u32,
+    response: &'a Value,
+}
+
+/// Best-effort statistics for the one-time loose-JSON to sharded-zstd migration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SuccessCacheMigrationStats {
+    pub scanned: u64,
+    pub migrated: u64,
+    pub already_present: u64,
+    pub failed: u64,
+    pub legacy_bytes_removed: u64,
+    pub compressed_bytes: u64,
+}
+
 impl SuccessResponseCache {
     fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
-    fn path(&self, provider: &str, identity: &str) -> PathBuf {
+    fn legacy_path(&self, provider: &str, identity: &str) -> PathBuf {
         self.root
             .join(provider)
             .join(format!("{:016x}.json", stable_fnv1a64(identity.as_bytes())))
     }
 
+    fn path(&self, provider: &str, identity: &str) -> PathBuf {
+        let digest = sha256_hex(identity.as_bytes());
+        self.root
+            .join(SUCCESS_CACHE_V2_DIR)
+            .join(provider)
+            .join(&digest[..2])
+            .join(format!("{digest}.json.zst"))
+    }
+
     fn load(&self, provider: &str, identity: &str) -> Option<Value> {
-        let body = fs::read(self.path(provider, identity)).ok()?;
+        if let Some(response) = self.load_v2(provider, identity) {
+            return Some(response);
+        }
+
+        let legacy_path = self.legacy_path(provider, identity);
+        let body = fs::read(&legacy_path).ok()?;
         let entry: SuccessCacheEntry = serde_json::from_slice(&body).ok()?;
-        (entry.request_identity == identity).then_some(entry.response)
+        if entry.request_identity != identity {
+            return None;
+        }
+        let response = entry.response;
+        if self.store_v2(provider, identity, &response).is_ok() {
+            let _ = fs::remove_file(legacy_path);
+        }
+        Some(response)
     }
 
     fn store(&self, provider: &str, identity: &str, response: Value) {
+        let _ = self.store_v2(provider, identity, &response);
+    }
+
+    fn load_v2(&self, provider: &str, identity: &str) -> Option<Value> {
         let path = self.path(provider, identity);
-        let Some(parent) = path.parent() else {
-            return;
-        };
-        if fs::create_dir_all(parent).is_err() {
-            return;
+        let body = fs::read(path).ok()?;
+        let decoded = zstd::stream::decode_all(Cursor::new(body)).ok()?;
+        let entry: SuccessCacheEntryV2 = serde_json::from_slice(&decoded).ok()?;
+        (entry.version == SUCCESS_CACHE_FORMAT_VERSION).then_some(entry.response)
+    }
+
+    fn store_v2(
+        &self,
+        provider: &str,
+        identity: &str,
+        response: &Value,
+    ) -> Result<u64, std::io::Error> {
+        let path = self.path(provider, identity);
+        if self.load_v2(provider, identity).is_some() {
+            return fs::metadata(path).map(|metadata| metadata.len());
         }
-        let entry = SuccessCacheEntry {
-            request_identity: identity.to_owned(),
+        let Some(parent) = path.parent() else {
+            return Ok(0);
+        };
+        fs::create_dir_all(parent)?;
+        let entry = SuccessCacheEntryV2Ref {
+            version: SUCCESS_CACHE_FORMAT_VERSION,
             response,
         };
-        let Ok(body) = serde_json::to_vec(&entry) else {
-            return;
+        let body = serde_json::to_vec(&entry).map_err(std::io::Error::other)?;
+        let compressed = zstd::stream::encode_all(Cursor::new(body), SUCCESS_CACHE_ZSTD_LEVEL)?;
+        let len = compressed.len() as u64;
+        atomic_replace(&path, &compressed)?;
+        Ok(len)
+    }
+}
+
+/// Convert every legacy provider-level `*.json` response under `root` into the
+/// compressed sharded layout. Each legacy file is removed only after the new
+/// entry is durably written and can be decoded, so interrupted migrations are
+/// safely resumable and untouched entries remain readable by [`HttpClient`].
+pub fn migrate_legacy_success_response_cache(root: &std::path::Path) -> SuccessCacheMigrationStats {
+    migrate_legacy_success_response_cache_with_progress(root, || {})
+}
+
+pub fn migrate_legacy_success_response_cache_with_progress(
+    root: &std::path::Path,
+    mut on_scanned: impl FnMut(),
+) -> SuccessCacheMigrationStats {
+    let mut stats = SuccessCacheMigrationStats::default();
+    let Ok(providers) = fs::read_dir(root) else {
+        return stats;
+    };
+    let cache = SuccessResponseCache::new(root.to_path_buf());
+    for provider_dir in providers.flatten() {
+        let path = provider_dir.path();
+        if !path.is_dir() || provider_dir.file_name() == SUCCESS_CACHE_V2_DIR {
+            continue;
+        }
+        let Some(provider) = provider_dir.file_name().to_str().map(str::to_owned) else {
+            continue;
         };
-        let sequence = CACHE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), sequence));
-        if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, &path).is_err() {
-            let _ = fs::copy(&tmp, &path);
-            let _ = fs::remove_file(&tmp);
+        let Ok(files) = fs::read_dir(&path) else {
+            stats.failed += 1;
+            continue;
+        };
+        for file in files.flatten() {
+            let legacy_path = file.path();
+            if !legacy_path.is_file()
+                || legacy_path.extension().and_then(|ext| ext.to_str()) != Some("json")
+            {
+                continue;
+            }
+            stats.scanned += 1;
+            on_scanned();
+            let legacy_len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            let result = fs::read(&legacy_path)
+                .ok()
+                .and_then(|body| serde_json::from_slice::<SuccessCacheEntry>(&body).ok())
+                .and_then(|entry| {
+                    let already_present =
+                        cache.load_v2(&provider, &entry.request_identity).is_some();
+                    let compressed_len = cache
+                        .store_v2(&provider, &entry.request_identity, &entry.response)
+                        .ok()?;
+                    cache
+                        .load_v2(&provider, &entry.request_identity)
+                        .map(|_| (already_present, compressed_len))
+                });
+            let Some((already_present, compressed_len)) = result else {
+                stats.failed += 1;
+                continue;
+            };
+            if fs::remove_file(&legacy_path).is_err() {
+                stats.failed += 1;
+                continue;
+            }
+            stats.migrated += 1;
+            stats.already_present += u64::from(already_present);
+            stats.legacy_bytes_removed += legacy_len;
+            stats.compressed_bytes += compressed_len;
         }
     }
+    stats
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn atomic_replace(path: &std::path::Path, body: &[u8]) -> Result<(), std::io::Error> {
+    let sequence = CACHE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), sequence));
+    fs::write(&tmp, body)?;
+    if !path.exists() {
+        return fs::rename(tmp, path);
+    }
+
+    let backup = path.with_extension(format!("{}.{}.bak", std::process::id(), sequence));
+    fs::rename(path, &backup)?;
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::rename(&backup, path);
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    let _ = fs::remove_file(backup);
+    Ok(())
 }
 
 fn stable_fnv1a64(bytes: &[u8]) -> u64 {
@@ -1354,17 +1515,85 @@ mod tests {
 
         assert_eq!(first_value, second_value);
         mock.assert_hits_async(1).await;
-        let cache_text = fs::read_to_string(
-            fs::read_dir(dir.join("helius"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path(),
+        let identity = success_cache_identity(
+            &reqwest::Method::POST,
+            &redact_endpoint(&format!("{}/?api-key=ignored", server.base_url())),
+            Some(&body),
+        );
+        let cache = SuccessResponseCache::new(dir.clone());
+        let cache_path = cache.path("helius", &identity);
+        assert!(cache_path.is_file());
+        let cache_text = String::from_utf8(
+            zstd::stream::decode_all(Cursor::new(fs::read(cache_path).unwrap())).unwrap(),
         )
         .unwrap();
         assert!(!cache_text.contains("first-secret"));
         assert!(!cache_text.contains("different-secret"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_success_cache_is_reused_and_migrated_without_network() {
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_http_success_cache_legacy_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let cache = SuccessResponseCache::new(dir.clone());
+        let provider = "alchemy";
+        let identity = "POST\nexample.test\n{\"method\":\"getTransaction\"}";
+        let response = serde_json::json!({"jsonrpc":"2.0","result":{"ok":true}});
+        let legacy_path = cache.legacy_path(provider, identity);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            serde_json::to_vec(&SuccessCacheEntry {
+                request_identity: identity.into(),
+                response: response.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cache.load(provider, identity), Some(response));
+        assert!(!legacy_path.exists());
+        assert!(cache.path(provider, identity).is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bulk_success_cache_migration_preserves_corrupt_legacy_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_http_success_cache_bulk_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let cache = SuccessResponseCache::new(dir.clone());
+        let identity = "GET\nexample.test\n";
+        let legacy = cache.legacy_path("helius", identity);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy,
+            serde_json::to_vec(&SuccessCacheEntry {
+                request_identity: identity.into(),
+                response: serde_json::json!({"result":1}),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let corrupt = legacy.parent().unwrap().join("corrupt.json");
+        fs::write(&corrupt, b"not-json").unwrap();
+
+        let stats = migrate_legacy_success_response_cache(&dir);
+        assert_eq!(stats.scanned, 2);
+        assert_eq!(stats.migrated, 1);
+        assert_eq!(stats.failed, 1);
+        assert!(!legacy.exists());
+        assert!(corrupt.exists());
+        assert_eq!(
+            cache.load_v2("helius", identity),
+            Some(serde_json::json!({"result":1}))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
