@@ -466,9 +466,12 @@ pub struct HttpLimits {
     pub max_solana_assets: usize,
     pub max_history_assets: usize,
     pub max_signatures_per_asset: usize,
-    /// Durable raw JSON cache for successful, non-volatile provider requests.
+    /// Durable raw JSON cache for every fully successful provider request.
     /// API secrets are excluded from cache identities.
     pub success_response_cache_dir: Option<std::path::PathBuf>,
+    /// Ignore entries older than this Unix timestamp while still storing and
+    /// reusing successful responses produced during the current run.
+    pub success_response_cache_min_unix: Option<i64>,
     /// Candidate-scoped controller/collection identity checkpoint. Unlike the
     /// raw response cache, this remains reusable when batch boundaries change.
     pub candidate_identity_cache_path: Option<std::path::PathBuf>,
@@ -490,6 +493,7 @@ impl Default for HttpLimits {
             max_history_assets: 20,
             max_signatures_per_asset: 50,
             success_response_cache_dir: None,
+            success_response_cache_min_unix: None,
             candidate_identity_cache_path: None,
             endpoints: ProviderEndpoints::default(),
         }

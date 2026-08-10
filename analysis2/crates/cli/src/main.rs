@@ -78,6 +78,11 @@ struct RunArgs {
     #[arg(long, default_value_t = 12)]
     http_concurrency: usize,
 
+    /// Ignore raw API responses cached before this run and refresh each exact
+    /// request once; newly successful responses are reused within the run.
+    #[arg(long)]
+    refresh_api_cache: bool,
+
     /// Path for durable dedup cache (default: `<output-dir>/intermediate/dedup_cache.json`).
     /// Written after dedup on `run`. Compatible cache is **auto-reused** on later runs.
     #[arg(long)]
@@ -226,6 +231,7 @@ fn run() -> Result<(), Analysis2Error> {
                     rayon_threads: args.rayon_threads,
                     api_keys,
                     http_concurrency: args.http_concurrency,
+                    refresh_api_cache: args.refresh_api_cache,
                     paper: PaperConfig::default(),
                     enrich_override: None,
                     dedup_cache_path: args.dedup_cache,
@@ -300,6 +306,17 @@ mod tests {
         argv.extend(["--name-threshold", "0.97"]);
         let args = RunArgs::try_parse_from(argv).unwrap();
         assert_eq!(args.name_threshold, Some(0.97));
+    }
+
+    #[test]
+    fn api_cache_refresh_is_opt_in() {
+        let args = RunArgs::try_parse_from(required_run_args()).unwrap();
+        assert!(!args.refresh_api_cache);
+
+        let mut argv = required_run_args();
+        argv.push("--refresh-api-cache");
+        let args = RunArgs::try_parse_from(argv).unwrap();
+        assert!(args.refresh_api_cache);
     }
 
     #[test]

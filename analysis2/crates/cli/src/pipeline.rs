@@ -153,6 +153,8 @@ pub struct RunConfig {
     pub rayon_threads: Option<usize>,
     pub api_keys: ApiKeys,
     pub http_concurrency: usize,
+    /// Ignore raw API success-cache entries created before this run.
+    pub refresh_api_cache: bool,
     pub paper: PaperConfig,
     /// When set, used instead of Tokio `enrich_candidates` (tests / offline fixtures).
     pub enrich_override: Option<EnrichOverride>,
@@ -1159,6 +1161,12 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
     let limits = HttpLimits {
         concurrency: config.http_concurrency.max(1),
         success_response_cache_dir: Some(success_response_cache_dir),
+        success_response_cache_min_unix: config.refresh_api_cache.then(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or(0)
+        }),
         candidate_identity_cache_path: Some(
             config
                 .output_dir
@@ -2036,6 +2044,7 @@ mod tests {
                 rayon_threads: Some(2),
                 api_keys: ApiKeys::default(),
                 http_concurrency: 4,
+                refresh_api_cache: false,
                 paper: PaperConfig {
                     analysis_timestamp: 1_700_000_100,
                     ..PaperConfig::default()
@@ -2235,6 +2244,7 @@ mod tests {
                 rayon_threads: Some(2),
                 api_keys: ApiKeys::default(),
                 http_concurrency: 4,
+                refresh_api_cache: false,
                 paper: PaperConfig::default(),
                 enrich_override: Some(enrich),
                 dedup_cache_path: None,
@@ -2299,6 +2309,7 @@ mod tests {
             rayon_threads: Some(2),
             api_keys: ApiKeys::default(),
             http_concurrency: 4,
+            refresh_api_cache: false,
             paper: PaperConfig {
                 analysis_timestamp: 1_700_000_100,
                 ..PaperConfig::default()
@@ -2379,6 +2390,7 @@ mod tests {
                 rayon_threads: Some(2),
                 api_keys: ApiKeys::default(),
                 http_concurrency: 4,
+                refresh_api_cache: false,
                 paper: PaperConfig::default(),
                 enrich_override: Some(enrich),
                 dedup_cache_path: None,

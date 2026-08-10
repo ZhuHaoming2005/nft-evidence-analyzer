@@ -118,13 +118,18 @@ End-to-end: load → dedup all seeds → enrich unique candidates → deep analy
 The example explicitly enables Name deduplication with `--name-threshold 0.98`; omit
 that flag to skip both the Name index build and Name duplicate queries.
 
-Successful non-price provider JSON responses are durably cached under
+Every fully successful non-price provider JSON response is durably cached under
 `intermediate/api_success_cache/v2/<provider>/<sha-prefix>/` as zstd-compressed,
 SHA-256-addressed entries. Cache identities exclude API secrets and are independent
 of the derived evidence-cache version. The next full run incrementally migrates and
 then removes legacy provider-level `*.json` entries only after the compressed entry
-is readable, so an interrupted migration remains resumable. Failed responses are
-retried; Alchemy spot-price responses remain day-refreshed rather than permanent.
+is readable, so an interrupted migration remains resumable. Exact method + URI +
+POST-body matches reuse the old successful response, including OpenSea REST,
+collection, holder, asset, and market requests. Current-price requests are deliberately
+excluded from the durable cache and are fetched again on each run (while identical
+price requests are still coalesced within one run). Failed responses are retried.
+Pass `--refresh-api-cache` to ignore responses predating the current run; each exact
+request is then refreshed once and reused for the rest of that run.
 Candidate controller and Solana collection-identity probes are additionally
 checkpointed by stable chain/address under
 `intermediate/candidate_identity_cache.json`, so changing HTTP batch boundaries

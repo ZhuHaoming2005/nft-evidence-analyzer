@@ -28,7 +28,8 @@ pub const OPENSEA_RATE_LIMIT_REFILL_MS: u64 = 300;
 pub const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(1);
 const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 static CACHE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const SUCCESS_CACHE_FORMAT_VERSION: u32 = 2;
+const SUCCESS_CACHE_FORMAT_VERSION: u32 = 3;
+const MIN_SUCCESS_CACHE_FORMAT_VERSION: u32 = 2;
 const SUCCESS_CACHE_ZSTD_LEVEL: i32 = 3;
 const SUCCESS_CACHE_V2_DIR: &str = "v2";
 
@@ -46,12 +47,15 @@ struct SuccessCacheEntry {
 #[derive(Serialize, Deserialize)]
 struct SuccessCacheEntryV2 {
     version: u32,
+    #[serde(default)]
+    cached_at: Option<i64>,
     response: Value,
 }
 
 #[derive(Serialize)]
 struct SuccessCacheEntryV2Ref<'a> {
     version: u32,
+    cached_at: i64,
     response: &'a Value,
 }
 
@@ -86,8 +90,8 @@ impl SuccessResponseCache {
             .join(format!("{digest}.json.zst"))
     }
 
-    fn load(&self, provider: &str, identity: &str) -> Option<Value> {
-        if let Some(response) = self.load_v2(provider, identity) {
+    fn load(&self, provider: &str, identity: &str, min_cached_at: Option<i64>) -> Option<Value> {
+        if let Some(response) = self.load_v2(provider, identity, min_cached_at) {
             return Some(response);
         }
 
@@ -97,23 +101,41 @@ impl SuccessResponseCache {
         if entry.request_identity != identity {
             return None;
         }
+        let cached_at = file_modified_unix(&legacy_path).unwrap_or(0);
+        if min_cached_at.is_some_and(|minimum| cached_at < minimum) {
+            return None;
+        }
         let response = entry.response;
-        if self.store_v2(provider, identity, &response).is_ok() {
+        if self
+            .store_v2(provider, identity, &response, cached_at)
+            .is_ok()
+        {
             let _ = fs::remove_file(legacy_path);
         }
         Some(response)
     }
 
     fn store(&self, provider: &str, identity: &str, response: Value) {
-        let _ = self.store_v2(provider, identity, &response);
+        let _ = self.store_v2(provider, identity, &response, unix_now());
     }
 
-    fn load_v2(&self, provider: &str, identity: &str) -> Option<Value> {
+    fn load_v2(&self, provider: &str, identity: &str, min_cached_at: Option<i64>) -> Option<Value> {
         let path = self.path(provider, identity);
         let body = fs::read(path).ok()?;
         let decoded = zstd::stream::decode_all(Cursor::new(body)).ok()?;
         let entry: SuccessCacheEntryV2 = serde_json::from_slice(&decoded).ok()?;
-        (entry.version == SUCCESS_CACHE_FORMAT_VERSION).then_some(entry.response)
+        if !(MIN_SUCCESS_CACHE_FORMAT_VERSION..=SUCCESS_CACHE_FORMAT_VERSION)
+            .contains(&entry.version)
+        {
+            return None;
+        }
+        let cached_at = entry
+            .cached_at
+            .unwrap_or_else(|| file_modified_unix(&self.path(provider, identity)).unwrap_or(0));
+        if min_cached_at.is_some_and(|minimum| cached_at < minimum) {
+            return None;
+        }
+        Some(entry.response)
     }
 
     fn store_v2(
@@ -121,17 +143,16 @@ impl SuccessResponseCache {
         provider: &str,
         identity: &str,
         response: &Value,
+        cached_at: i64,
     ) -> Result<u64, std::io::Error> {
         let path = self.path(provider, identity);
-        if self.load_v2(provider, identity).is_some() {
-            return fs::metadata(path).map(|metadata| metadata.len());
-        }
         let Some(parent) = path.parent() else {
             return Ok(0);
         };
         fs::create_dir_all(parent)?;
         let entry = SuccessCacheEntryV2Ref {
             version: SUCCESS_CACHE_FORMAT_VERSION,
+            cached_at,
             response,
         };
         let body = serde_json::to_vec(&entry).map_err(std::io::Error::other)?;
@@ -185,13 +206,25 @@ pub fn migrate_legacy_success_response_cache_with_progress(
                 .ok()
                 .and_then(|body| serde_json::from_slice::<SuccessCacheEntry>(&body).ok())
                 .and_then(|entry| {
-                    let already_present =
-                        cache.load_v2(&provider, &entry.request_identity).is_some();
-                    let compressed_len = cache
-                        .store_v2(&provider, &entry.request_identity, &entry.response)
-                        .ok()?;
+                    let already_present = cache
+                        .load_v2(&provider, &entry.request_identity, None)
+                        .is_some();
+                    let compressed_len = if already_present {
+                        fs::metadata(cache.path(&provider, &entry.request_identity))
+                            .ok()?
+                            .len()
+                    } else {
+                        cache
+                            .store_v2(
+                                &provider,
+                                &entry.request_identity,
+                                &entry.response,
+                                file_modified_unix(&legacy_path).unwrap_or(0),
+                            )
+                            .ok()?
+                    };
                     cache
-                        .load_v2(&provider, &entry.request_identity)
+                        .load_v2(&provider, &entry.request_identity, None)
                         .map(|_| (already_present, compressed_len))
                 });
             let Some((already_present, compressed_len)) = result else {
@@ -400,6 +433,7 @@ pub struct HttpClient {
     /// Magic Eden / other non-primary providers.
     other: ProviderLane,
     success_cache: Option<SuccessResponseCache>,
+    success_cache_min_unix: Option<i64>,
 }
 
 impl HttpClient {
@@ -415,6 +449,15 @@ impl HttpClient {
         concurrency: usize,
         retries: usize,
         cache_dir: Option<PathBuf>,
+    ) -> Result<Self, Analysis2Error> {
+        Self::with_retries_and_cache_since(concurrency, retries, cache_dir, None)
+    }
+
+    pub fn with_retries_and_cache_since(
+        concurrency: usize,
+        retries: usize,
+        cache_dir: Option<PathBuf>,
+        success_cache_min_unix: Option<i64>,
     ) -> Result<Self, Analysis2Error> {
         let n = concurrency.max(1);
         // Each provider gets its own pool of size `n` (Alchemy uses the CLI
@@ -460,6 +503,7 @@ impl HttpClient {
             ),
             other: ProviderLane::new("other", other_n, TokenBucketRateLimiter::concurrency_only()),
             success_cache: cache_dir.map(SuccessResponseCache::new),
+            success_cache_min_unix,
         })
     }
 
@@ -469,7 +513,7 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<Value, Analysis2Error> {
-        self.request_on_lane(reqwest::Method::GET, url, headers, None, &self.other)
+        self.request_on_lane(reqwest::Method::GET, url, headers, None, &self.other, true)
             .await
     }
 
@@ -478,8 +522,32 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<Value, Analysis2Error> {
-        self.request_on_lane(reqwest::Method::GET, url, headers, None, &self.alchemy)
-            .await
+        self.request_on_lane(
+            reqwest::Method::GET,
+            url,
+            headers,
+            None,
+            &self.alchemy,
+            true,
+        )
+        .await
+    }
+
+    /// Alchemy GET whose response must stay fresh across runs (spot prices).
+    pub(crate) async fn get_json_alchemy_uncached(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Value, Analysis2Error> {
+        self.request_on_lane(
+            reqwest::Method::GET,
+            url,
+            headers,
+            None,
+            &self.alchemy,
+            false,
+        )
+        .await
     }
 
     pub async fn post_json_alchemy(
@@ -494,6 +562,25 @@ impl HttpClient {
             headers,
             Some(body),
             &self.alchemy,
+            true,
+        )
+        .await
+    }
+
+    /// Alchemy POST whose response must stay fresh across runs (spot prices).
+    pub(crate) async fn post_json_alchemy_uncached(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &Value,
+    ) -> Result<Value, Analysis2Error> {
+        self.request_on_lane(
+            reqwest::Method::POST,
+            url,
+            headers,
+            Some(body),
+            &self.alchemy,
+            false,
         )
         .await
     }
@@ -504,8 +591,15 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<Value, Analysis2Error> {
-        self.request_on_lane(reqwest::Method::GET, url, headers, None, &self.opensea)
-            .await
+        self.request_on_lane(
+            reqwest::Method::GET,
+            url,
+            headers,
+            None,
+            &self.opensea,
+            true,
+        )
+        .await
     }
 
     /// Generic POST on the "other" lane.
@@ -515,8 +609,15 @@ impl HttpClient {
         headers: &[(&str, &str)],
         body: &Value,
     ) -> Result<Value, Analysis2Error> {
-        self.request_on_lane(reqwest::Method::POST, url, headers, Some(body), &self.other)
-            .await
+        self.request_on_lane(
+            reqwest::Method::POST,
+            url,
+            headers,
+            Some(body),
+            &self.other,
+            true,
+        )
+        .await
     }
 
     /// POST on the Helius lane (`--http-concurrency` + provider-local 429 cool-down).
@@ -532,6 +633,7 @@ impl HttpClient {
             headers,
             Some(body),
             &self.helius,
+            true,
         )
         .await
     }
@@ -541,8 +643,15 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<Value, Analysis2Error> {
-        self.request_on_lane(reqwest::Method::GET, url, headers, None, &self.etherscan)
-            .await
+        self.request_on_lane(
+            reqwest::Method::GET,
+            url,
+            headers,
+            None,
+            &self.etherscan,
+            true,
+        )
+        .await
     }
 
     /// Shared retry loop for one provider lane: rate token → concurrency permit → HTTP.
@@ -553,16 +662,18 @@ impl HttpClient {
         headers: &[(&str, &str)],
         body: Option<&Value>,
         lane: &ProviderLane,
+        use_success_cache: bool,
     ) -> Result<Value, Analysis2Error> {
         let header_map = build_headers(headers)?;
         let endpoint = redact_endpoint(url);
         let cache_identity = success_cache_identity(&method, &endpoint, body);
-        let cacheable = success_response_is_cacheable(&endpoint, body);
-        if cacheable && let Some(cache) = self.success_cache.clone() {
+        if use_success_cache && let Some(cache) = self.success_cache.clone() {
             let provider = lane.name;
             let identity = cache_identity.clone();
+            let min_cached_at = self.success_cache_min_unix;
             if let Ok(Some(value)) =
-                tokio::task::spawn_blocking(move || cache.load(provider, &identity)).await
+                tokio::task::spawn_blocking(move || cache.load(provider, &identity, min_cached_at))
+                    .await
             {
                 return Ok(value);
             }
@@ -612,7 +723,7 @@ impl HttpClient {
                         }
                         continue;
                     }
-                    if cacheable
+                    if use_success_cache
                         && response_is_fully_successful(&value)
                         && let Some(cache) = self.success_cache.clone()
                     {
@@ -1069,47 +1180,11 @@ fn success_cache_identity(
     format!("{method}\n{redacted_endpoint}\n{body}")
 }
 
-/// Cache only immutable, transaction/block-addressed RPC responses. Mutable
-/// collection, holder, asset, market, latest-block, and price snapshots must
-/// be refreshed under the derived evidence cache's explicit policy.
-fn success_response_is_cacheable(redacted_endpoint: &str, body: Option<&Value>) -> bool {
-    let lower = redacted_endpoint.to_ascii_lowercase();
-    if lower.contains("api.g.alchemy.com/prices/") || lower.contains("/prices/v1/") {
-        return false;
-    }
-    // REST NFT/market endpoints and collection/owner snapshots are mutable.
-    // The derived evidence cache owns their explicit refresh policy; a hidden
-    // raw-response cache must never defeat a requested refresh.
-    if body.is_none() {
-        return false;
-    }
-    rpc_body_is_immutable(body.expect("checked above"))
-}
-
-fn rpc_body_is_immutable(body: &Value) -> bool {
-    if let Some(rows) = body.as_array() {
-        return !rows.is_empty() && rows.iter().all(rpc_body_is_immutable);
-    }
-    let Some(method) = body.get("method").and_then(Value::as_str) else {
-        return false;
-    };
-    match method {
-        "eth_getTransactionReceipt" | "alchemy_getTransactionReceipts" | "getTransaction" => true,
-        "eth_getBlockByNumber" => body
-            .pointer("/params/0")
-            .and_then(Value::as_str)
-            .is_some_and(|block| !block.eq_ignore_ascii_case("latest")),
-        "eth_call" => body
-            .pointer("/params/1")
-            .and_then(Value::as_str)
-            .is_some_and(|block| !block.eq_ignore_ascii_case("latest")),
-        _ => false,
-    }
-}
-
+/// Accept only complete provider successes. HTTP failures never reach this
+/// function; provider and JSON-RPC error envelopes remain retryable.
 fn response_is_fully_successful(value: &Value) -> bool {
     if let Some(rows) = value.as_array() {
-        return !rows.is_empty() && rows.iter().all(response_is_fully_successful);
+        return rows.iter().all(response_is_fully_successful);
     }
     let Some(object) = value.as_object() else {
         return true;
@@ -1118,9 +1193,26 @@ fn response_is_fully_successful(value: &Value) -> bool {
         return false;
     }
     if object.contains_key("jsonrpc") {
-        return object.get("result").is_some_and(|result| !result.is_null());
+        return object.contains_key("result");
     }
     true
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn file_modified_unix(path: &std::path::Path) -> Option<i64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs() as i64)
 }
 
 /// Host + path + redacted query for logs (never includes API keys).
@@ -1264,7 +1356,10 @@ pub fn print_provider_error(source: &str, request_key: &str, error: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use httpmock::{Method::POST, MockServer};
+    use httpmock::{
+        Method::{GET, POST},
+        MockServer,
+    };
 
     #[test]
     fn endpoint_log_label_never_contains_path_or_api_key() {
@@ -1440,21 +1535,21 @@ mod tests {
     }
 
     #[test]
-    fn durable_cache_rejects_partial_or_failed_jsonrpc_payloads_and_prices() {
+    fn durable_cache_accepts_empty_successes_and_rejects_provider_errors() {
         assert!(response_is_fully_successful(&serde_json::json!({
             "jsonrpc":"2.0", "result": {"id":"asset"}
         })));
-        assert!(!response_is_fully_successful(&serde_json::json!({
+        assert!(response_is_fully_successful(&serde_json::json!({
             "jsonrpc":"2.0", "result": null
         })));
+        assert!(response_is_fully_successful(&serde_json::json!([])));
         assert!(!response_is_fully_successful(&serde_json::json!([
             {"jsonrpc":"2.0", "result": {"ok":true}},
             {"jsonrpc":"2.0", "error": {"code":-32000}}
         ])));
-        assert!(!success_response_is_cacheable(
-            "api.g.alchemy.com/prices/v1/***/tokens/by-symbol",
-            None,
-        ));
+        assert!(!response_is_fully_successful(&serde_json::json!({
+            "errors": ["not found"]
+        })));
     }
 
     #[test]
@@ -1532,6 +1627,204 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn durable_success_cache_reuses_mutable_get_and_empty_payload() {
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v2/events/collection/example")
+                    .query_param("cursor", "page-1");
+                then.status(200)
+                    .json_body(serde_json::json!({"asset_events": [], "next": null}));
+            })
+            .await;
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_http_success_cache_get_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let url = format!(
+            "{}/api/v2/events/collection/example?cursor=page-1",
+            server.base_url()
+        );
+
+        let first = HttpClient::with_retries_and_cache(1, 0, Some(dir.clone())).unwrap();
+        let expected = first
+            .get_json_opensea(&url, &[("x-api-key", "first")])
+            .await
+            .unwrap();
+        let second = HttpClient::with_retries_and_cache(1, 0, Some(dir.clone())).unwrap();
+        let reused = second
+            .get_json_opensea(&url, &[("x-api-key", "second")])
+            .await
+            .unwrap();
+
+        assert_eq!(expected, reused);
+        mock.assert_hits_async(1).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn uncached_alchemy_requests_never_read_or_write_durable_cache() {
+        let server = MockServer::start_async().await;
+        let get_mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/prices");
+                then.status(200)
+                    .json_body(serde_json::json!({"price": "1.25"}));
+            })
+            .await;
+        let post_mock = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/prices-by-address");
+                then.status(200)
+                    .json_body(serde_json::json!({"price": "2.50"}));
+            })
+            .await;
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_http_uncached_price_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let url = format!("{}/prices", server.base_url());
+        let address_url = format!("{}/prices-by-address", server.base_url());
+        let body = serde_json::json!({"addresses": ["0x1"]});
+        let client = HttpClient::with_retries_and_cache(1, 0, Some(dir.clone())).unwrap();
+
+        for _ in 0..2 {
+            assert_eq!(
+                client.get_json_alchemy_uncached(&url, &[]).await.unwrap(),
+                serde_json::json!({"price": "1.25"})
+            );
+            assert_eq!(
+                client
+                    .post_json_alchemy_uncached(&address_url, &[], &body)
+                    .await
+                    .unwrap(),
+                serde_json::json!({"price": "2.50"})
+            );
+        }
+
+        get_mock.assert_hits_async(2).await;
+        post_mock.assert_hits_async(2).await;
+        assert!(!dir.join(SUCCESS_CACHE_V2_DIR).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn refresh_cutoff_replaces_old_entry_once_then_reuses_new_success() {
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/snapshot");
+                then.status(200)
+                    .json_body(serde_json::json!({"value": "fresh"}));
+            })
+            .await;
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_http_success_cache_refresh_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let url = format!("{}/snapshot", server.base_url());
+        let identity = success_cache_identity(&reqwest::Method::GET, &redact_endpoint(&url), None);
+        let cache = SuccessResponseCache::new(dir.clone());
+        cache
+            .store_v2(
+                "opensea",
+                &identity,
+                &serde_json::json!({"value": "old"}),
+                1,
+            )
+            .unwrap();
+        let cutoff = unix_now();
+        let client =
+            HttpClient::with_retries_and_cache_since(1, 0, Some(dir.clone()), Some(cutoff))
+                .unwrap();
+
+        let first = client.get_json_opensea(&url, &[]).await.unwrap();
+        let second = client.get_json_opensea(&url, &[]).await.unwrap();
+
+        assert_eq!(first, serde_json::json!({"value": "fresh"}));
+        assert_eq!(first, second);
+        mock.assert_hits_async(1).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn provider_error_response_is_never_cached() {
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(200).json_body(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": "not found"}
+                }));
+            })
+            .await;
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_http_success_cache_error_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let client = HttpClient::with_retries_and_cache(1, 0, Some(dir.clone())).unwrap();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "getAsset",
+            "params": {"id": "missing"}
+        });
+
+        for _ in 0..2 {
+            let value = client
+                .post_json_helius(&server.base_url(), &[], &body)
+                .await
+                .unwrap();
+            assert!(value.get("error").is_some());
+        }
+        mock.assert_hits_async(2).await;
+        assert_eq!(
+            fs::read_dir(dir.join(SUCCESS_CACHE_V2_DIR))
+                .ok()
+                .into_iter()
+                .flatten()
+                .count(),
+            0
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_two_compressed_entry_remains_reusable() {
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_http_success_cache_v2_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let cache = SuccessResponseCache::new(dir.clone());
+        let identity = "GET\nexample.test/snapshot\n";
+        let path = cache.path("opensea", identity);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = serde_json::to_vec(&SuccessCacheEntryV2 {
+            version: 2,
+            cached_at: None,
+            response: serde_json::json!({"ok": true}),
+        })
+        .unwrap();
+        fs::write(
+            &path,
+            zstd::stream::encode_all(Cursor::new(body), 3).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cache.load("opensea", identity, None),
+            Some(serde_json::json!({"ok": true}))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn legacy_success_cache_is_reused_and_migrated_without_network() {
         let dir = std::env::temp_dir().join(format!(
@@ -1555,7 +1848,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(cache.load(provider, identity), Some(response));
+        assert_eq!(cache.load(provider, identity, None), Some(response));
         assert!(!legacy_path.exists());
         assert!(cache.path(provider, identity).is_file());
         let _ = fs::remove_dir_all(&dir);
@@ -1591,7 +1884,7 @@ mod tests {
         assert!(!legacy.exists());
         assert!(corrupt.exists());
         assert_eq!(
-            cache.load_v2("helius", identity),
+            cache.load_v2("helius", identity, None),
             Some(serde_json::json!({"result":1}))
         );
         let _ = fs::remove_dir_all(&dir);

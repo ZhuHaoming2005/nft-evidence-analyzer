@@ -51,10 +51,11 @@ pub async fn enrich_candidates_with_hook(
     progress: &dyn ProgressObserver,
     mut on_bundle: Option<&mut BundleHook<'_>>,
 ) -> Result<AHashMap<ContractId, EvidenceBundle>, Analysis2Error> {
-    let client = HttpClient::with_retries_and_cache(
+    let client = HttpClient::with_retries_and_cache_since(
         limits.concurrency.max(1),
         limits.retries,
         limits.success_response_cache_dir.clone(),
+        limits.success_response_cache_min_unix,
     )?;
     progress.set_stage("enrich_legit");
     let preflight =
@@ -185,10 +186,11 @@ pub async fn refresh_relation_legit(
     limits: &HttpLimits,
     progress: &dyn ProgressObserver,
 ) -> Result<AHashMap<ContractId, EvidenceBundle>, Analysis2Error> {
-    let client = HttpClient::with_retries_and_cache(
+    let client = HttpClient::with_retries_and_cache_since(
         limits.concurrency.max(1),
         limits.retries,
         limits.success_response_cache_dir.clone(),
+        limits.success_response_cache_min_unix,
     )?;
     progress.set_stage("enrich_legit");
     let preflight =
@@ -207,10 +209,11 @@ pub async fn refresh_cached_prices(
     limits: &HttpLimits,
     progress: &dyn ProgressObserver,
 ) -> Result<(), Analysis2Error> {
-    let client = HttpClient::with_retries_and_cache(
+    let client = HttpClient::with_retries_and_cache_since(
         limits.concurrency.max(1),
         limits.retries,
         limits.success_response_cache_dir.clone(),
+        limits.success_response_cache_min_unix,
     )?;
     let price_cache = alchemy::PriceRequestCache::default();
     progress.set_stage("enrich_prices");
@@ -280,10 +283,11 @@ pub async fn refresh_cached_evm_holders(
     limits: &HttpLimits,
     progress: &dyn ProgressObserver,
 ) -> Result<(), Analysis2Error> {
-    let client = HttpClient::with_retries_and_cache(
+    let client = HttpClient::with_retries_and_cache_since(
         limits.concurrency.max(1),
         limits.retries,
         limits.success_response_cache_dir.clone(),
+        limits.success_response_cache_min_unix,
     )?;
     progress.set_stage("enrich_holders");
     progress.begin_phase("refresh_cached_holders", Some(candidates.len() as u64));

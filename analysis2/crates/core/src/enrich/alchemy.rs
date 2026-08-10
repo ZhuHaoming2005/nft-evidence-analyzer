@@ -676,7 +676,7 @@ async fn fetch_price_subset(
             api_key,
             query
         );
-        let payload = match client.get_json_alchemy(&url, &[]).await {
+        let payload = match client.get_json_alchemy_uncached(&url, &[]).await {
             Ok(payload) => payload,
             Err(_) => {
                 symbol_fetch_failed = true;
@@ -719,7 +719,10 @@ async fn fetch_price_subset(
                     .map(|address| json!({"network": network, "address": address}))
                     .collect::<Vec<_>>()
             });
-            match client.post_json_alchemy(&address_url, &[], &body).await {
+            match client
+                .post_json_alchemy_uncached(&address_url, &[], &body)
+                .await
+            {
                 Ok(payload) if payload.get("error").is_none() => {
                     for address in requested_addresses {
                         if let Some(usd) = parse_by_address_usd(&payload, chain, address) {
@@ -2274,6 +2277,43 @@ mod receipt_gas_tests {
         assert_eq!(prices.hits(), 1);
         assert_eq!(first.value.len(), 1);
         assert_eq!(second.value.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn price_requests_do_not_reuse_durable_http_cache_across_clients() {
+        let server = MockServer::start_async().await;
+        let prices = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/key/tokens/by-symbol")
+                    .query_param("symbols", "ETH");
+                then.status(200).json_body(json!({
+                    "data": [{
+                        "symbol": "ETH",
+                        "prices": [{"currency": "usd", "value": "2000"}]
+                    }]
+                }));
+            })
+            .await;
+        let endpoints = ProviderEndpoints {
+            alchemy_prices: server.base_url(),
+            ..ProviderEndpoints::default()
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "analysis2_price_no_durable_cache_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for _ in 0..2 {
+            let client = HttpClient::with_retries_and_cache(1, 0, Some(dir.clone())).unwrap();
+            let outcome =
+                fetch_prices(&client, &endpoints, Some("key"), "ethereum", &[], &[]).await;
+            assert_eq!(outcome.value.len(), 1);
+        }
+
+        assert_eq!(prices.hits(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
