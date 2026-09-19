@@ -34,7 +34,7 @@ def _load_scanner(fake_common):
     original = {name: sys.modules.get(name) for name in injected}
     sys.modules.update(injected)
     try:
-        path = Path(__file__).resolve().parents[1] / "run" / "solana" / "tx_scanner.py"
+        path = Path(__file__).resolve().parents[1] / "src" / "fetch" / "solana" / "tx_scanner.py"
         spec = importlib.util.spec_from_file_location("solana_tx_scanner_under_test", path)
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None

@@ -51,7 +51,7 @@ def _load_solana_common():
     original = {name: sys.modules.get(name) for name in injected}
     sys.modules.update(injected)
     try:
-        path = Path(__file__).resolve().parents[1] / "run" / "solana" / "common.py"
+        path = Path(__file__).resolve().parents[1] / "src" / "fetch" / "solana" / "common.py"
         spec = importlib.util.spec_from_file_location("solana_common_under_test", path)
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None

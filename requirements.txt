@@ -2,9 +2,3 @@ aiohttp
 psycopg2-binary
 python-dotenv
 web3
-duckdb
-base58
-pyarrow
-numpy
-maturin
-rich

@@ -1,0 +1,22 @@
+[package]
+name = "nft-snapshot-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nft-snapshot-export"
+path = "src/main.rs"
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+clap.workspace = true
+parquet.workspace = true
+postgres.workspace = true
+regex.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "dedup_cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dedup"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+ctrlc.workspace = true
+dedup_core.workspace = true
+csv.workspace = true
+rayon.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+base64.workspace = true
+getrandom.workspace = true
+url.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+parquet.workspace = true

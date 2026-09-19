@@ -27,7 +27,7 @@ def _load_fetcher(fake_common):
     original = {name: sys.modules.get(name) for name in injected}
     sys.modules.update(injected)
     try:
-        path = Path(__file__).resolve().parents[1] / "run" / "solana" / "metadata_fetcher.py"
+        path = Path(__file__).resolve().parents[1] / "src" / "fetch" / "solana" / "metadata_fetcher.py"
         spec = importlib.util.spec_from_file_location("solana_metadata_fetcher_under_test", path)
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
