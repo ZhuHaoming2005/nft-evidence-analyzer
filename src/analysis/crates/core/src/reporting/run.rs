@@ -835,8 +835,7 @@ fn apply_dedup_dimensions(summary: &mut Value, dimensions: &Value) {
 }
 
 /// Aggregate one independently analyzed reporting scope over every available
-/// seed report. Additional reports are kept for API compatibility and are
-/// included identically.
+/// seed report, treating primary and additional reports identically.
 pub fn build_run_summary_for_scope(
     selected: &[SeedRecord],
     reports: &[&SeedFullReport],
@@ -1675,7 +1674,7 @@ fn build_run_summary_for_scope_with_store(
     summary
 }
 
-/// Backward-compatible all-chains summary builder.
+/// Aggregate seed reports across all configured chains.
 pub fn build_run_summary(
     selected: &[SeedRecord],
     reports: &[&SeedFullReport],
@@ -2929,7 +2928,7 @@ mod tests {
         };
         use crate::enrich::{EvidenceBundle, LegitSignals, finalize_legit_signals};
 
-        // Plumbing: future enrich can set flags; classify → summary must exclude.
+        // Verified legitimate duplicates are excluded from these summary metrics.
         let mut bundle = EvidenceBundle::empty(2, "base", "0xlegit");
         bundle.legit = LegitSignals {
             verified_migration: true,

@@ -1418,7 +1418,7 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
         }
     }
 
-    // P0: provenance is on disk; strip before analyze to shrink RSS.
+    // Provenance is on disk; strip it before analysis to reduce memory use.
     for bundle in evidence.values_mut() {
         bundle.strip_for_analysis_memory();
     }
@@ -1427,7 +1427,7 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
     // Every reporting scope reuses the same cached evidence, filtered by these sets.
     let all_scope_selectors = build_scope_selectors(&registry, &store, None);
 
-    // P1: seed reports + selectors are self-contained for NFT numerators; analyze
+    // Seed reports and selectors are self-contained for NFT numerators; analyze
     // only needs contract id → chain/address. Drop full NFT/string universe now.
     store.shrink_identity_for_analysis();
 
@@ -1449,7 +1449,7 @@ fn run_inner(config: &RunConfig, progress: &dyn ProgressObserver) -> Result<(), 
         .collect();
     drop(evidence);
 
-    // P1: background writer — Rayon only serializes; fs::write runs off-CPU pool.
+    // Rayon serializes reports; a background writer handles file I/O.
     let (write_tx, write_rx) = mpsc::sync_channel::<(String, Vec<u8>)>(
         rayon::current_num_threads().saturating_mul(4).max(8),
     );

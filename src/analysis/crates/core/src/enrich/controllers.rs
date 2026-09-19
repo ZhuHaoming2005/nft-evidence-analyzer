@@ -139,7 +139,7 @@ pub async fn fetch_evm_controllers(
 /// Fetch controller evidence for many contracts while preserving the exact
 /// per-contract output shape of [`fetch_evm_controllers`]. Contracts are
 /// grouped by chain and sent in bounded metadata/RPC batches; an unusable
-/// provider batch falls back to the original individual path.
+/// provider batch falls back to individual requests.
 pub async fn fetch_evm_controllers_batch(
     client: &HttpClient,
     endpoints: &ProviderEndpoints,

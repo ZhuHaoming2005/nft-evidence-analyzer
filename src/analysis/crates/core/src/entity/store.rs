@@ -745,18 +745,13 @@ fn build_contract_nft_csr(nfts: &[Nft]) -> CsrIndex {
     CsrIndex::from_sorted_pairs(&pairs)
 }
 
-/// Deprecated alias kept for call-site stability; prefer [`crate::dedup::name::finalize_name_index`].
-pub fn finalize_name_representatives_stub(store: &mut ResidentStore) {
-    let _ = store; // real finalize is invoked from the load path via dedup::name
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ahash::AHashSet;
 
     #[test]
-    fn resident_store_default_is_empty_skeleton() {
+    fn resident_store_default_is_empty() {
         let store = ResidentStore::new();
         assert!(store.is_empty());
         assert!(store.token_uri_csr.is_empty());

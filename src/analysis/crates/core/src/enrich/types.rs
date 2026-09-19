@@ -257,7 +257,7 @@ pub fn finalize_legit_signals(bundle: &mut EvidenceBundle) {
     bundle.legit.verification_complete = false;
 }
 
-/// Per-candidate enrichment product consumed by deep analysis (Task 12).
+/// Per-candidate enrichment evidence consumed by analysis.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EvidenceBundle {

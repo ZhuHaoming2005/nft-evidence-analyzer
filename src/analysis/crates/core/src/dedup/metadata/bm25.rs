@@ -167,13 +167,6 @@ impl PreparedDocument {
         let start = self.term_start as usize;
         &terms[start..start + self.term_len as usize]
     }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn term_range(&self) -> std::ops::Range<usize> {
-        let start = self.term_start as usize;
-        start..start + self.term_len as usize
-    }
 }
 
 pub(crate) fn visit_tokens<'a, E>(
@@ -284,7 +277,7 @@ pub fn similarity_score_if_at_least(
     Some(score.unwrap_or_else(|| cosine_similarity(left, left_terms, right, right_terms)))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn similarity_at_least_after_overlap_filter(
     left: &PreparedDocument,
     left_terms: &[(u32, u32)],
@@ -710,7 +703,7 @@ fn terminal_negative_below_threshold(
 
     // The strict, directed comparison proves the quotient is below a guard
     // that covers both correctly-rounded sqrt and division. Any boundary,
-    // subnormal, overflow, or non-finite case falls back to the original path.
+    // subnormal, overflow, or non-finite case requires the full cosine calculation.
     let numerator_upper = numerator.next_up();
     let numerator_squared_upper = (numerator_upper * numerator_upper).next_up();
     let threshold_squared_lower = (guarded_threshold * guarded_threshold).next_down();
@@ -772,7 +765,7 @@ fn decision_at_least(
 }
 
 #[cfg(test)]
-fn legacy_cosine_similarity(
+fn reference_cosine_similarity(
     left: &PreparedDocument,
     left_terms: &[(u32, u32)],
     right: &PreparedDocument,
@@ -789,8 +782,8 @@ fn legacy_cosine_similarity(
             (Some((left_term, left_tf)), Some((right_term, right_tf))) => {
                 match left_term.cmp(right_term) {
                     std::cmp::Ordering::Equal => {
-                        let left_weight = legacy_weight(*left_tf, left.length, avgdl, 2);
-                        let right_weight = legacy_weight(*right_tf, right.length, avgdl, 2);
+                        let left_weight = reference_weight(*left_tf, left.length, avgdl, 2);
+                        let right_weight = reference_weight(*right_tf, right.length, avgdl, 2);
                         dot += left_weight * right_weight;
                         left_norm_squared += left_weight * left_weight;
                         right_norm_squared += right_weight * right_weight;
@@ -798,24 +791,24 @@ fn legacy_cosine_similarity(
                         right_pos += 1;
                     }
                     std::cmp::Ordering::Less => {
-                        let left_weight = legacy_weight(*left_tf, left.length, avgdl, 1);
+                        let left_weight = reference_weight(*left_tf, left.length, avgdl, 1);
                         left_norm_squared += left_weight * left_weight;
                         left_pos += 1;
                     }
                     std::cmp::Ordering::Greater => {
-                        let right_weight = legacy_weight(*right_tf, right.length, avgdl, 1);
+                        let right_weight = reference_weight(*right_tf, right.length, avgdl, 1);
                         right_norm_squared += right_weight * right_weight;
                         right_pos += 1;
                     }
                 }
             }
             (Some((_, left_tf)), None) => {
-                let left_weight = legacy_weight(*left_tf, left.length, avgdl, 1);
+                let left_weight = reference_weight(*left_tf, left.length, avgdl, 1);
                 left_norm_squared += left_weight * left_weight;
                 left_pos += 1;
             }
             (None, Some((_, right_tf))) => {
-                let right_weight = legacy_weight(*right_tf, right.length, avgdl, 1);
+                let right_weight = reference_weight(*right_tf, right.length, avgdl, 1);
                 right_norm_squared += right_weight * right_weight;
                 right_pos += 1;
             }
@@ -835,7 +828,12 @@ fn legacy_cosine_similarity(
 }
 
 #[cfg(test)]
-fn legacy_weight(frequency: u32, document_length: u32, avgdl: f64, document_frequency: u32) -> f64 {
+fn reference_weight(
+    frequency: u32,
+    document_length: u32,
+    avgdl: f64,
+    document_frequency: u32,
+) -> f64 {
     let frequency = f64::from(frequency);
     let document_length = f64::from(document_length);
     let document_frequency = f64::from(document_frequency);
@@ -1001,8 +999,8 @@ mod tests {
         cosine_similarity(&left.document, &left.terms, &right.document, &right.terms)
     }
 
-    fn legacy_similarity(left: &PreparedDocumentParts, right: &PreparedDocumentParts) -> f64 {
-        legacy_cosine_similarity(&left.document, &left.terms, &right.document, &right.terms)
+    fn reference_similarity(left: &PreparedDocumentParts, right: &PreparedDocumentParts) -> f64 {
+        reference_cosine_similarity(&left.document, &left.terms, &right.document, &right.terms)
     }
 
     fn threshold_decision(
@@ -1099,7 +1097,11 @@ mod tests {
         }
     }
 
-    fn legacy_histogram_norm(histogram: &[(u32, u32)], length_norm: f64, unit_weight: f64) -> f64 {
+    fn reference_histogram_norm(
+        histogram: &[(u32, u32)],
+        length_norm: f64,
+        unit_weight: f64,
+    ) -> f64 {
         histogram
             .iter()
             .map(|(frequency, count)| {
@@ -1178,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn ascii_fast_tokenizer_matches_the_original_character_split() {
+    fn ascii_fast_tokenizer_matches_the_reference_character_split() {
         let text = r#"{"name":"Alpha-42_beta","url":"https://example.com/a1"}"#;
         let expected = text
             .split(|character: char| !character.is_alphanumeric())
@@ -1409,7 +1411,7 @@ mod tests {
             let weights = PairWeights::new(&left, &right);
             assert_eq!(
                 weights.left_base_norm.to_bits(),
-                legacy_histogram_norm(
+                reference_histogram_norm(
                     left.frequency_histogram.as_slice(),
                     weights.left_length_norm,
                     weights.left_unit_weight,
@@ -1419,7 +1421,7 @@ mod tests {
             );
             assert_eq!(
                 weights.right_base_norm.to_bits(),
-                legacy_histogram_norm(
+                reference_histogram_norm(
                     right.frequency_histogram.as_slice(),
                     weights.right_length_norm,
                     weights.right_unit_weight,
@@ -1722,7 +1724,7 @@ mod tests {
     }
 
     #[test]
-    fn optimized_score_matches_legacy_score() {
+    fn optimized_score_matches_reference_score() {
         let documents = [
             "alpha beta gamma",
             "alpha alpha beta delta epsilon",
@@ -1735,15 +1737,15 @@ mod tests {
         for left in &documents {
             for right in &documents {
                 let optimized = similarity(left, right);
-                let legacy = legacy_similarity(left, right);
+                let reference = reference_similarity(left, right);
                 assert!(
-                    (optimized - legacy).abs() <= 1e-12,
-                    "optimized={optimized}, legacy={legacy}"
+                    (optimized - reference).abs() <= 1e-12,
+                    "optimized={optimized}, reference={reference}"
                 );
                 for threshold in [0.0, 0.2, 0.6, 0.95, 1.01] {
                     assert_eq!(
                         threshold_decision(left, right, threshold).matched,
-                        legacy >= threshold
+                        reference >= threshold
                     );
                 }
             }
@@ -1761,7 +1763,7 @@ mod tests {
         let decision = threshold_decision(left, right, 0.6);
         assert!(!decision.matched);
         assert!(decision.upper_bound_pruned || decision.zero_overlap_pruned);
-        assert!(legacy_similarity(left, right) < 0.6);
+        assert!(reference_similarity(left, right) < 0.6);
     }
 
     #[test]
@@ -1786,12 +1788,12 @@ mod tests {
         let documents = prepare(&texts.iter().map(String::as_str).collect::<Vec<_>>());
         for left in &documents {
             for right in &documents {
-                let legacy = legacy_similarity(left, right);
+                let reference = reference_similarity(left, right);
                 for threshold in [0.2, 0.4, 0.6, 0.8, 0.95] {
                     assert_eq!(
                         threshold_decision(left, right, threshold).matched,
-                        legacy >= threshold,
-                        "legacy={legacy}, threshold={threshold}"
+                        reference >= threshold,
+                        "reference={reference}, threshold={threshold}"
                     );
                 }
             }
@@ -1850,7 +1852,7 @@ mod tests {
 
         for (left_id, left) in documents.iter().enumerate() {
             for (right_id, right) in documents.iter().enumerate() {
-                if legacy_similarity(left, right) < 0.6 {
+                if reference_similarity(left, right) < 0.6 {
                     continue;
                 }
                 assert!(

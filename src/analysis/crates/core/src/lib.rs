@@ -1,4 +1,4 @@
-//! analysis core library (engines filled in by later tasks).
+//! NFT seed matching, evidence collection, and report generation.
 
 pub mod analysis;
 pub mod dedup;
@@ -35,7 +35,6 @@ pub use enrich::{
 pub use entity::{
     ChainId, ChainTotals, Contract, ContractId, CsrIndex, IdentityRow, MetadataRecord, Nft, NftId,
     ResidentStore, SourceOrder, StringId, StringPool, compare_token_ids, compare_token_ids_desc,
-    finalize_name_representatives_stub,
 };
 pub use error::AnalysisError;
 pub use parquet::{

@@ -10880,7 +10880,7 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_anchors_include_matches_beyond_the_previous_default() {
+    fn unbounded_anchors_include_late_token_matches() {
         let evm = ["ethereum".to_owned()].into_iter().collect::<HashSet<_>>();
         let mut store = EntityStore::with_options(None, &evm.iter().cloned().collect());
         for address in ["0xa", "0xb"] {

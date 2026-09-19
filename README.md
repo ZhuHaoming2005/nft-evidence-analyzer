@@ -1,57 +1,88 @@
 # NFT Evidence Analyzer
 
-Research artifact for NFT collection, snapshot export, content deduplication, and
-evidence analysis across Ethereum, Base, Polygon, and Solana.
+Research artifact for NFT data collection, content deduplication, and evidence
+analysis across Ethereum, Base, Polygon, and Solana.
 
-| Component | Purpose |
+## Components
+
+| Directory | Function |
 |---|---|
-| [fetch](src/fetch/README.md) | Collect NFT records and metadata into PostgreSQL |
-| [export](src/export/README.md) | Export consistent per-chain Parquet snapshots |
-| [dedup](src/dedup/README.md) | Measure snapshot-wide Name, URI, and Metadata duplication; sample matching media |
-| [analysis](src/analysis/README.md) | Select seeds, identify matches, collect evidence, and generate reports |
-| [docs](docs/README.md) | Matching methods, reporting semantics, and reproducibility boundaries |
-| [tests](tests) | Offline collector regression tests |
+| `src/fetch` | Python collectors that store NFT records and metadata in PostgreSQL |
+| `src/export` | Rust exporter that produces per-chain Parquet snapshots |
+| `src/dedup` | In-memory Name, URI, and Metadata matching and media sampling |
+| `src/analysis` | Seed selection, candidate matching, evidence collection, and behavior/economic reports |
+| `tests` | Offline Python collector tests using mocked APIs and databases |
 
 ```text
-Chain/provider APIs -> Python collectors -> PostgreSQL -> Parquet exporter
-                                                           |-> dedup
-                                                           |-> seed analysis
+Blockchain/provider APIs -> Collectors -> PostgreSQL -> Parquet snapshots
+                                                        |-> Deduplication
+                                                        |-> Seed evidence analysis
 ```
 
-## Setup
+All commands run from the repository root. Component READMEs describe their
+specific inputs, outputs, and options.
 
-Run commands from the repository root. Install Python 3.10+ and a Rust toolchain
-supporting edition 2024. Live collection also needs PostgreSQL and provider access.
-One root Cargo workspace manages all five Rust crates with a shared `Cargo.lock`
-and `target/` directory. Use `--locked` for reproducible dependency resolution.
-JSON arbitrary-precision support is enabled for every member so numeric parsing
-does not depend on whether a package is built alone or with the whole workspace.
+## Environment and build
 
-| Package | Location | Executable |
-|---|---|---|
-| `analysis_core` | `src/analysis/crates/core` | Library |
-| `analysis_cli` | `src/analysis/crates/cli` | `analysis` |
-| `dedup_core` | `src/dedup/crates/core` | Library |
-| `dedup_cli` | `src/dedup/crates/cli` | `dedup` |
-| `nft-snapshot-export` | `src/export` | `nft-snapshot-export` |
-
-Use `cargo build --workspace --locked` to build everything, or select a package
-with `-p`, for example `cargo run -p analysis_cli --locked -- --help`.
-The shared release profile uses thin LTO. `--profile dedup-release` preserves
-the deduplication executable's fat-LTO build; outputs go to `target/dedup-release/`.
+Use Python 3.10+ and a Rust toolchain supporting edition 2024. Live collection
+requires PostgreSQL and provider credentials. Rust dependencies are recorded in
+`Cargo.lock`; Python dependencies are listed in `requirements.txt` without a lockfile.
 
 ```powershell
 python -m venv .venv
 .venv/Scripts/Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
+cargo build --workspace --locked
 ```
 
-Fill in `.env` for Python collection. The exporter reads process environment
-variables; the analysis CLI accepts provider keys as command-line flags. Neither
-Rust program automatically loads `.env`. Component READMEs contain runnable commands.
+Configure PostgreSQL and provider settings in `.env` for the Python collectors.
+For Solana, merge `src/fetch/solana/.env.example` into that file. Rust commands do
+not load `.env`: export database settings as process environment variables and
+pass analysis provider keys through CLI options.
 
-## Offline validation
+The root Cargo workspace manages all Rust packages and shares `target/`:
+
+| Package | Executable |
+|---|---|
+| `nft-snapshot-export` | `nft-snapshot-export` |
+| `dedup_cli` | `dedup` |
+| `analysis_cli` | `analysis` |
+| `dedup_core`, `analysis_core` | Libraries |
+
+Use `--release` for the shared thin-LTO profile or `--profile dedup-release` for
+the deduplication fat-LTO profile. Matching indexes remain in memory; there is no
+automatic disk spill or approximate fallback. The large-scale design target is
+128 vCPU / 512 GiB RAM on Linux, not a measured minimum requirement.
+
+## Workflow
+
+1. Run the chain scanner and metadata fetcher in separate terminals. Collection
+   persists scan progress and stores accepted records in `nft_assets_<chain>`.
+2. Export each chain to Parquet. Each export uses a consistent database transaction;
+   separate chain exports are not synchronized snapshots.
+3. Run `dedup all` for snapshot-wide matching, or `sample-metadata` for media samples.
+4. Use `analysis select-seeds` to rank collections, then `run-dedup` for seed matching
+   or `run` for evidence collection and full reports. Manually supplied seeds are supported.
+
+Inspect command options without contacting providers:
+
+```powershell
+cargo run -p nft-snapshot-export --locked -- --help
+cargo run -p dedup_cli --locked -- --help
+cargo run -p analysis_cli --locked -- --help
+```
+
+Name matching is disabled unless a threshold is supplied. `dedup` uses a percentage
+such as `98`; `analysis` uses a fraction such as `0.98`. Metadata similarity defaults
+to `0.6`. Analysis downloads uncached seed populations through Alchemy or Helius,
+so `run-dedup` is not necessarily offline.
+
+Deduplication writes CSV summaries and a run manifest. Analysis writes JSON and
+Markdown reports under `detail/` and `summary/`, with caches and manifests under
+`intermediate/`. Compatible caches are reused automatically.
+
+## Validation
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -60,24 +91,27 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Rust tests cover matching oracles, report fields, and generated Parquet fixtures.
-Collector tests use mocked providers and databases. No production dataset or
-provider credentials are distributed. Local inputs and results belong in `data/`,
-`seeds/`, `out/`, or `output/` and are excluded from version control.
+Rust tests cover matching oracles, generated Parquet fixtures, and report behavior.
+The exporter database test is ignored by default; set `NFT_EXPORT_TEST_DATABASE_URL`
+to a disposable PostgreSQL database and run:
 
-## Reproducing an experiment
+```powershell
+cargo test -p nft-snapshot-export --locked metadata_column_follows_search_path -- --ignored
+```
 
-Record the Git revision, toolchain versions, dependency versions, ordered input
-paths and hashes, export time and block bounds, selected seeds, CLI flags, hardware,
-and generated run manifests alongside each result. Archive seed and evidence caches
-when comparing reruns: live rankings, holder snapshots, API responses, and spot
-prices change over time. Python dependencies currently have no lockfile, so record
-`python -m pip freeze` with the run.
+## Reproducibility and interpretation
 
-The target large-scale host is 128 vCPU / 512 GiB RAM on Linux; this is a design
-target, not a measured minimum. Matching indexes are resident in memory. Passing
-offline tests does not establish full-dataset performance, live evidence coverage,
-or reproduction of paper results. Content similarity alone does not establish
-infringement; reports retain evidence-quality and attribution boundaries.
+Record the revision, toolchain and dependency versions, ordered input hashes,
+export bounds, seeds, CLI parameters, hardware, and run manifests. Archive the
+seed and evidence caches used for each experiment. Live rankings, API responses,
+holder snapshots, and spot prices can change between runs. Keep local inputs and
+outputs under `data/`, `seeds/`, `out/`, or `output/`; these are ignored by Git.
 
-Code is distributed under the [MIT license](LICENSE).
+No production dataset or provider credentials are distributed. Offline tests do
+not establish full-dataset performance or reproduce paper results. Collection
+filters and provider coverage constrain the observed population. Media samples
+are not uniform population estimates, and content similarity alone does not
+establish infringement. Reports retain evidence quality and attribution limits;
+buyer paid exposure is not realized loss, and USD amounts use execution-time prices.
+
+Licensed under MIT.

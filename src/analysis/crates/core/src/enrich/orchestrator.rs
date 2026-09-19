@@ -1094,7 +1094,7 @@ async fn enrich_solana(
         }
     }
     if let Some(mut obs) = history.observation {
-        // Discovery observation must match final quality after decode (P3).
+        // Discovery observation must match final quality after decode.
         if !matches!(
             history.status,
             EvidenceStatus::NotRequested | EvidenceStatus::Failed
@@ -2644,7 +2644,7 @@ mod tests {
         assert_eq!(bundle.quality.histories, EvidenceStatus::Truncated);
         // Stubs lack from/fee — gas must not be Complete.
         assert_ne!(bundle.quality.gas, EvidenceStatus::Complete);
-        // P3: discovery provenance must not stay Complete when decode leaves Truncated.
+        // Discovery provenance must not stay Complete when decode leaves Truncated.
         let hist_obs = bundle
             .provenance
             .iter()

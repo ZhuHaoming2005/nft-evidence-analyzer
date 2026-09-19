@@ -900,9 +900,9 @@ pub(super) async fn prefilter_candidates(
     })
 }
 
-/// Compatibility entry point for callers that already hold enriched bundles.
+/// Attach verified relation labels to existing enriched bundles.
 ///
-/// New pipeline code should use the pre-enrichment gate in the orchestrator.
+/// The orchestrator gates candidates before enrichment to avoid unnecessary requests.
 pub async fn attach_relation_legit(
     evidence: &mut AHashMap<ContractId, EvidenceBundle>,
     registry: &CandidateRegistry,

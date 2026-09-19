@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[command(
     name = "analysis",
     version,
-    about = "Experimental in-memory NFT analysis pipeline"
+    about = "In-memory NFT evidence analysis pipeline"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -121,7 +121,7 @@ struct SelectSeedsArgs {
     #[arg(long, default_value_t = 25)]
     seeds_per_chain: usize,
 
-    /// OpenSea API key (required for EVM ranking in later tasks).
+    /// OpenSea API key (required for EVM seed ranking).
     #[arg(long)]
     opensea_api_key: Option<String>,
 
@@ -144,7 +144,7 @@ enum Command {
     SelectSeeds(SelectSeedsArgs),
     /// End-to-end: load → dedup → enrich → analyze → reports.
     Run(RunArgs),
-    /// Debug path: load + dedup + hit/candidate reports only.
+    /// Load snapshots, match seeds, and write hit/candidate reports.
     RunDedup(RunArgs),
 }
 

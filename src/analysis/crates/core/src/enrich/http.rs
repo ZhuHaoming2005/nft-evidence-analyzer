@@ -1,4 +1,4 @@
-//! Shared HTTP client scaffolding for seed selection and enrichment.
+//! Shared HTTP client for seed selection and enrichment.
 
 use std::fs;
 use std::io::Cursor;

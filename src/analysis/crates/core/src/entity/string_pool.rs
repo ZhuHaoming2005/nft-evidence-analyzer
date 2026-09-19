@@ -17,9 +17,8 @@ fn hash_str(s: &str) -> u64 {
 
 /// Global intern table for names, URIs, and other repeated strings.
 ///
-/// Each unique string is stored once in `strings`. The hash map only holds
-/// candidate ids (equality-checked against the arena), so intern avoids the
-/// previous double `String` allocation on every first insert.
+/// Each unique string is stored once in `strings`. The hash map holds only
+/// candidate IDs, which are equality-checked against the stored strings.
 #[derive(Clone, Debug, Default)]
 pub struct StringPool {
     strings: Vec<String>,

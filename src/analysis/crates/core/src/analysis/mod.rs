@@ -1,4 +1,4 @@
-//! Deep analysis for enriched candidates (Task 12).
+//! Evidence analysis for enriched candidates.
 
 mod attribution;
 mod behavior;

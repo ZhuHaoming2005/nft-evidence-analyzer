@@ -240,8 +240,8 @@ async fn fetch_collection_identity_probe(
 }
 
 /// Resolve many collection identities through the DAS `getAssetBatch`
-/// endpoint. Missing or malformed batch members fall back to `getAsset`
-/// individually, preserving the previous result semantics.
+/// endpoint. Missing or malformed batch members fall back to individual
+/// `getAsset` requests.
 pub async fn fetch_collection_identities_batch(
     client: &HttpClient,
     rpc_url: &str,
@@ -924,8 +924,7 @@ async fn fetch_asset_history_batch(
         }
     }
 
-    // A malformed/partial batch must not lose an asset history. Retry every
-    // member independently so quality remains identical to the old path.
+    // Retry each asset separately when a batch is malformed or incomplete.
     let mut handles = Vec::with_capacity(assets.len());
     for asset in assets {
         let asset = asset.clone();

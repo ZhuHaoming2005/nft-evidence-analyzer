@@ -473,8 +473,8 @@ pub fn query_name_for_seed_with_scratch(
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Rayon preserves indexed chunk order. Deduping in that order keeps the
-        // previous "first query id wins" score selection deterministic.
+        // Rayon preserves indexed chunk order, so the first matching query ID
+        // determines the emitted score regardless of worker scheduling.
         for chunk_graph in chunk_graphs {
             for edge in chunk_graph.into_edges() {
                 if scratch

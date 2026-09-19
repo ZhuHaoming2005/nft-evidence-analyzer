@@ -229,6 +229,16 @@ class SolanaCommonDbFormatTests(unittest.TestCase):
             ],
         )
 
+    def test_batch_insert_temp_rejects_invalid_record_shapes_before_writing(self):
+        for record in [("Mint111", "Metaplex"), ("Mint111", "1", "Metaplex", 123456)]:
+            with self.subTest(record=record):
+                conn = _RecordingConn()
+                with self.assertRaisesRegex(ValueError, "mint_address, token_standard, first_seen_block"):
+                    self.common.batch_insert_temp(
+                        conn, "solana", [("Mint222", "Metaplex", 123456), record]
+                    )
+                self.assertEqual(conn.cursor_obj.executed, [])
+
     def test_batch_insert_main_serializes_metadata_and_uses_collection_plus_mint(self):
         conn = _RecordingConn()
         metadata = {"name": "NFT\x00 #1", "attributes": [{"trait_type": "rank\x00"}]}

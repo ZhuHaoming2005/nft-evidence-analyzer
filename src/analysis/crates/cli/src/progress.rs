@@ -54,7 +54,6 @@ struct Meta {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // consumed by later report/timing tasks
 pub struct PhaseTimingSnapshot {
     pub stage: String,
     pub phase: String,
@@ -123,14 +122,14 @@ impl ProgressReporter {
         }
     }
 
-    #[allow(dead_code)] // wired when engines support Ctrl-C cancel
+    /// Return a handle for cooperative cancellation.
     pub fn cancel_handle(&self) -> CancelHandle {
         CancelHandle {
             shared: Arc::clone(&self.shared),
         }
     }
 
-    #[allow(dead_code)] // used by later timing/report tasks
+    /// Return completed phase timings and the elapsed active phase.
     pub fn phase_timings(&self) -> Vec<PhaseTimingSnapshot> {
         let meta = self.shared.meta.lock().expect("progress lock");
         let mut timings = meta.phase_history.clone();
@@ -166,13 +165,12 @@ impl Drop for ProgressReporter {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)] // wired when engines support Ctrl-C cancel
 pub struct CancelHandle {
     shared: Arc<Shared>,
 }
 
 impl CancelHandle {
-    #[allow(dead_code)]
+    /// Request cooperative cancellation.
     pub fn request_cancel(&self) {
         self.shared.cancelled.store(true, Ordering::SeqCst);
     }

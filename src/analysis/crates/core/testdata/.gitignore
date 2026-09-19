@@ -1,3 +1,2 @@
 *.parquet
 *_out/
-report_golden_out/

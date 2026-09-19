@@ -1,5 +1,4 @@
 use crate::entity::{ChainId, ContractId};
-use crate::error::DedupError;
 use ahash::{AHashMap, AHashSet};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -14,14 +13,6 @@ pub(crate) struct SamplingRandomness {
 
 impl SamplingRandomness {
     pub(crate) const DISABLED: Self = Self { key: [0; 32] };
-
-    #[allow(dead_code)]
-    pub(crate) fn from_os() -> Result<Self, DedupError> {
-        let mut key = [0_u8; 32];
-        getrandom::fill(&mut key)
-            .map_err(|error| DedupError::Message(format!("OS random source failed: {error}")))?;
-        Ok(Self { key })
-    }
 
     pub(crate) fn score(&self, domain: &[u8], values: &[u64]) -> u64 {
         let mut digest = Sha256::new();

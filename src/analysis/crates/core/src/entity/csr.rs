@@ -1,6 +1,6 @@
 //! Compact sparse-row posting index and chain-grouped URI postings.
 
-use super::ids::{ChainId, ContractId, NftId, StringId};
+use super::ids::ChainId;
 
 /// CSR postings: sorted keys with contiguous value slices via offsets.
 ///
@@ -214,19 +214,4 @@ impl UriChainIndex {
             runs,
         }
     }
-}
-
-/// URI posting group identity (contract-scoped), for future builders.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct UriPostingKey {
-    pub uri_id: StringId,
-    pub contract_id: ContractId,
-}
-
-/// Name posting payload stub (contract- or NFT-level members).
-#[derive(Clone, Debug, Default)]
-pub struct NamePostingStub {
-    pub name_id: Option<StringId>,
-    pub contract_ids: Vec<ContractId>,
-    pub nft_ids: Vec<NftId>,
 }

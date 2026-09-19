@@ -1,6 +1,6 @@
 //! Metadata query-to-index engine (descending anchors + BM25).
 //!
-//! Anchors are selected at load (Task 4). Finalize prepares BM25 documents and a
+//! Anchors are selected during loading. Finalization prepares BM25 documents and a
 //! term→document inverted index for lossless rare-prefix candidate probes.
 //! Query aligns one document pair per seed↔candidate (largest shared / max each
 //! side), then exact canonical match or BM25 cosine (default threshold 0.6).
@@ -310,8 +310,7 @@ impl MetadataIndex {
 }
 
 struct RawMetadataDocument<'a> {
-    /// Unique terms in first-token occurrence order. Keeping this order lets
-    /// the global catalog retain the exact historical term-id assignment.
+    /// Unique terms in first-token occurrence order for global term interning.
     terms: Vec<(&'a str, u32)>,
 }
 
@@ -1018,7 +1017,7 @@ mod tests {
 
     #[test]
     fn descending_anchors_from_load_order_are_largest_first() {
-        // Mirrors Task 4: tokens 1,2,10 with k=2 → descending [10, 2].
+        // Retained tokens 1, 2, 10 with k=2 yield descending anchors [10, 2].
         let store = prepared(
             &["ethereum"],
             2,

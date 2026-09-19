@@ -425,26 +425,20 @@ def save_gpa_progress(
     conn.commit()
 
 
-def batch_insert_temp(conn, chain_name: str, records: List[Tuple]) -> int:
-    """Insert discovered NFT records into the staging table."""
+def batch_insert_temp(conn, chain_name: str, records: List[Tuple[str, str, int]]) -> int:
+    """Insert (mint_address, token_standard, first_seen_block) staging records."""
     if not records:
         return 0
     tmp = _temp_table_name(chain_name)
-    normalized_records = []
     for rec in records:
-        if len(rec) == 3:
-            mint_address, token_standard, first_seen_block = rec
-        elif len(rec) == 4:
-            mint_address, _legacy_token_id, token_standard, first_seen_block = rec
-        else:
+        if len(rec) != 3:
             raise ValueError(
                 "Solana temp records must be (mint_address, token_standard, first_seen_block)"
             )
-        normalized_records.append((mint_address, token_standard, first_seen_block))
 
     with conn.cursor() as cur:
-        placeholders = ", ".join(["(%s, %s, %s)"] * len(normalized_records))
-        flat = [item for rec in normalized_records for item in rec]
+        placeholders = ", ".join(["(%s, %s, %s)"] * len(records))
+        flat = [item for rec in records for item in rec]
         cur.execute(
             f"""
             INSERT INTO {tmp} (mint_address, token_standard, first_seen_block)

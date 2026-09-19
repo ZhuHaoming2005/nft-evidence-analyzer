@@ -412,8 +412,7 @@ pub fn build_seed_duplicate_scale(
         .collect();
     let mut cross = DimensionNftSets::default();
 
-    // A seed-local graph is scanned once. The old path rescanned it once per
-    // dimension and scope (including an extra token scan for image fallback).
+    // Collect all dimensions and scopes in one pass over the seed's edges.
     for edge in graph.edges() {
         if edge.seed_contract != seed || edge.primary_chain != primary {
             continue;

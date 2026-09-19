@@ -8,9 +8,6 @@ venv/
 conda/
 .vscode/
 .worktrees/
-.claude/settings.local.json
-# Local historical planning notes, outside the research artifact.
-/docs/superpowers/
 
 # Build and test outputs
 target/
